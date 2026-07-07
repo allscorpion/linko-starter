@@ -3,16 +3,18 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"boot.dev/linko/internal/linkoerr"
 	"boot.dev/linko/internal/store"
+	pkgerr "github.com/pkg/errors"
 )
 
 func main() {
@@ -28,13 +30,49 @@ func main() {
 	os.Exit(status)
 }
 
+type stackTracer interface {
+	error
+	StackTrace() pkgerr.StackTrace
+}
+
+func replaceAttr(groups []string, a slog.Attr) slog.Attr {
+	if a.Key == "error" {
+		err, ok := a.Value.Any().(error)
+		if !ok {
+			return a
+		}
+		attrs := []slog.Attr{
+			{
+				Key:   "message",
+				Value: slog.StringValue(err.Error()),
+			},
+		}
+
+		attrs = append(attrs, linkoerr.Attrs(err)...)
+
+		if stackErr, ok := errors.AsType[stackTracer](err); ok {
+			attrs = append(attrs, slog.Attr{
+				Key:   "stack_trace",
+				Value: slog.StringValue(fmt.Sprintf("%+v", stackErr.StackTrace())),
+			})
+		}
+		return slog.GroupAttrs("error", attrs...)
+	}
+	return a
+}
+
 type closeFunc func() error
 
 func initializeLogger() (*slog.Logger, error, closeFunc) {
 	logFile := os.Getenv("LINKO_LOG_FILE")
 
+	debugHandler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level:       slog.LevelDebug,
+		ReplaceAttr: replaceAttr,
+	})
+
 	if logFile == "" {
-		return slog.New(slog.NewTextHandler(os.Stderr, nil)), nil, func() error { return nil }
+		return slog.New(debugHandler), nil, func() error { return nil }
 	}
 
 	file, err := os.OpenFile(logFile, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
@@ -44,7 +82,10 @@ func initializeLogger() (*slog.Logger, error, closeFunc) {
 
 	bufferedFile := bufio.NewWriterSize(file, 8192)
 
-	multiWriter := io.MultiWriter(os.Stderr, bufferedFile)
+	infoHandler := slog.NewJSONHandler(bufferedFile, &slog.HandlerOptions{
+		Level:       slog.LevelInfo,
+		ReplaceAttr: replaceAttr,
+	})
 
 	close := func() error {
 		if err := bufferedFile.Flush(); err != nil {
@@ -57,7 +98,10 @@ func initializeLogger() (*slog.Logger, error, closeFunc) {
 		return nil
 	}
 
-	return slog.New(slog.NewTextHandler(multiWriter, nil)), nil, close
+	return slog.New(slog.NewMultiHandler(
+		debugHandler,
+		infoHandler,
+	)), nil, close
 }
 
 func run(ctx context.Context, cancel context.CancelFunc, httpPort int, dataDir string) int {
@@ -76,7 +120,7 @@ func run(ctx context.Context, cancel context.CancelFunc, httpPort int, dataDir s
 
 	st, err := store.New(dataDir, logger)
 	if err != nil {
-		logger.Info(fmt.Sprintf("failed to create store: %v\n", err))
+		logger.Error(fmt.Sprintf("failed to create store: %v\n", err))
 		return 1
 	}
 
@@ -90,13 +134,13 @@ func run(ctx context.Context, cancel context.CancelFunc, httpPort int, dataDir s
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	logger.Info("Linko is shutting down")
+	logger.Debug("Linko is shutting down")
 	if err := s.shutdown(shutdownCtx); err != nil {
-		logger.Info(fmt.Sprintf("failed to shutdown server: %v\n", err))
+		logger.Error(fmt.Sprintf("failed to shutdown server: %v\n", err))
 		return 1
 	}
 	if serverErr != nil {
-		logger.Info(fmt.Sprintf("server error: %v\n", serverErr))
+		logger.Error(fmt.Sprintf("server error: %v\n", serverErr))
 		return 1
 	}
 

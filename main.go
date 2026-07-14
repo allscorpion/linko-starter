@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"boot.dev/linko/internal/build"
 	"boot.dev/linko/internal/linkoerr"
 	"boot.dev/linko/internal/store"
 	pkgerr "github.com/pkg/errors"
@@ -30,9 +31,34 @@ func main() {
 	os.Exit(status)
 }
 
+type multiError interface {
+	error
+	Unwrap() []error
+}
+
 type stackTracer interface {
 	error
 	StackTrace() pkgerr.StackTrace
+}
+
+func errorAttrs(err error) []slog.Attr {
+	attrs := []slog.Attr{
+		{
+			Key:   "message",
+			Value: slog.StringValue(err.Error()),
+		},
+	}
+
+	attrs = append(attrs, linkoerr.Attrs(err)...)
+
+	if stackErr, ok := errors.AsType[stackTracer](err); ok {
+		attrs = append(attrs, slog.Attr{
+			Key:   "stack_trace",
+			Value: slog.StringValue(fmt.Sprintf("%+v", stackErr.StackTrace())),
+		})
+	}
+
+	return attrs
 }
 
 func replaceAttr(groups []string, a slog.Attr) slog.Attr {
@@ -41,22 +67,17 @@ func replaceAttr(groups []string, a slog.Attr) slog.Attr {
 		if !ok {
 			return a
 		}
-		attrs := []slog.Attr{
-			{
-				Key:   "message",
-				Value: slog.StringValue(err.Error()),
-			},
+
+		if multErr, ok := errors.AsType[multiError](err); ok {
+			var errAttrs []slog.Attr
+			for i, err := range multErr.Unwrap() {
+				errAttrs = append(errAttrs, slog.GroupAttrs(fmt.Sprintf("error_%d", i+1), errorAttrs(err)...))
+			}
+
+			return slog.GroupAttrs("errors", errAttrs...)
 		}
 
-		attrs = append(attrs, linkoerr.Attrs(err)...)
-
-		if stackErr, ok := errors.AsType[stackTracer](err); ok {
-			attrs = append(attrs, slog.Attr{
-				Key:   "stack_trace",
-				Value: slog.StringValue(fmt.Sprintf("%+v", stackErr.StackTrace())),
-			})
-		}
-		return slog.GroupAttrs("error", attrs...)
+		return slog.GroupAttrs("error", errorAttrs(err)...)
 	}
 	return a
 }
@@ -111,6 +132,16 @@ func run(ctx context.Context, cancel context.CancelFunc, httpPort int, dataDir s
 		fmt.Printf("failed to generate logger with the following error: %v", err)
 		return 1
 	}
+
+	env := os.Getenv("ENV")
+	hostname, _ := os.Hostname()
+
+	logger = logger.With(
+		slog.String("git_sha", build.GitSHA),
+		slog.String("build_time", build.BuildTime),
+		slog.String("env", env),
+		slog.String("hostname", hostname),
+	)
 
 	defer func() {
 		if err := closeLogger(); err != nil {

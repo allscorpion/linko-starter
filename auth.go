@@ -39,16 +39,14 @@ func (s *server) authMiddleware(next http.Handler) http.Handler {
 			httpError(r.Context(), w, http.StatusInternalServerError, fmt.Errorf("internal server error: %w", err))
 			return
 		}
-		if !ok {
+		if ok == false {
 			httpError(r.Context(), w, http.StatusUnauthorized, fmt.Errorf("unauthorized"))
 			return
 		}
-		r = r.WithContext(context.WithValue(r.Context(), UserContextKey, username))
-		if v := r.Context().Value(logContextKey); v != nil {
-			if lc, ok := v.(*LogContext); ok {
-				lc.Username = username
-			}
+		if logCtx, ok := r.Context().Value(logContextKey).(*LogContext); ok {
+			logCtx.Username = username
 		}
+		r = r.WithContext(context.WithValue(r.Context(), UserContextKey, username))
 		next.ServeHTTP(w, r)
 	})
 }

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -15,7 +14,10 @@ import (
 	"boot.dev/linko/internal/build"
 	"boot.dev/linko/internal/linkoerr"
 	"boot.dev/linko/internal/store"
+	"github.com/lmittmann/tint"
+	"github.com/mattn/go-isatty"
 	pkgerr "github.com/pkg/errors"
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 func main() {
@@ -87,32 +89,38 @@ type closeFunc func() error
 func initializeLogger() (*slog.Logger, error, closeFunc) {
 	logFile := os.Getenv("LINKO_LOG_FILE")
 
-	debugHandler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+	noColor := true
+
+	if isatty.IsCygwinTerminal(os.Stderr.Fd()) || isatty.IsTerminal(os.Stderr.Fd()) {
+		noColor = false
+	}
+
+	debugHandler := tint.NewTextHandler(os.Stderr, &tint.Options{
 		Level:       slog.LevelDebug,
 		ReplaceAttr: replaceAttr,
+		NoColor:     noColor,
 	})
 
 	if logFile == "" {
 		return slog.New(debugHandler), nil, func() error { return nil }
 	}
 
-	file, err := os.OpenFile(logFile, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open log file: %v", err), nil
+	logger := &lumberjack.Logger{
+		Filename:   logFile,
+		MaxSize:    1,
+		MaxAge:     28,
+		MaxBackups: 10,
+		LocalTime:  false,
+		Compress:   true,
 	}
 
-	bufferedFile := bufio.NewWriterSize(file, 8192)
-
-	infoHandler := slog.NewJSONHandler(bufferedFile, &slog.HandlerOptions{
+	infoHandler := slog.NewJSONHandler(logger, &slog.HandlerOptions{
 		Level:       slog.LevelInfo,
 		ReplaceAttr: replaceAttr,
 	})
 
 	close := func() error {
-		if err := bufferedFile.Flush(); err != nil {
-			return fmt.Errorf("failed to flush log file: %w", err)
-		}
-		if err := file.Close(); err != nil {
+		if err := logger.Close(); err != nil {
 			return fmt.Errorf("failed to close log file: %w", err)
 		}
 

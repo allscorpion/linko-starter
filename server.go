@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -52,11 +53,32 @@ type server struct {
 	logger     *slog.Logger
 }
 
+func redactIP(addr string) string {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return host
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		return fmt.Sprintf("%d.%d.%d.x", ip4[0], ip4[1], ip4[2])
+	}
+	return ip.String()
+}
+
 func httpError(ctx context.Context, w http.ResponseWriter, status int, err error) {
 	if logCtx, ok := ctx.Value(logContextKey).(*LogContext); ok {
 		logCtx.Error = err
 	}
-	http.Error(w, err.Error(), status)
+
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusInternalServerError:
+		http.Error(w, http.StatusText(status), status)
+	default:
+		http.Error(w, err.Error(), status)
+	}
 }
 
 const logContextKey contextKey = "log_context"
@@ -77,14 +99,17 @@ func requestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 			r = r.WithContext(context.WithValue(r.Context(), logContextKey, logContext))
 			next.ServeHTTP(spyWriter, r)
 
+			request_id := spyWriter.Header().Get("X-Request-ID")
+
 			attrs := []any{
 				slog.String("method", r.Method),
 				slog.String("path", r.URL.Path),
-				slog.String("client_ip", r.RemoteAddr),
+				slog.String("client_ip", redactIP(r.RemoteAddr)),
 				slog.Duration("duration", time.Since(start)),
 				slog.Int("request_body_bytes", spyReader.bytesRead),
 				slog.Int("response_status", spyWriter.statusCode),
 				slog.Int("response_body_bytes", spyWriter.bytesWritten),
+				slog.String("request_id", request_id),
 			}
 			if logContext.Username != "" {
 				attrs = append(attrs, slog.String("user", logContext.Username))
@@ -97,12 +122,27 @@ func requestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 	}
 }
 
+func requestIdMiddleware() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			xRequestId := r.Header.Get("X-Request-ID")
+
+			if xRequestId == "" {
+				xRequestId = rand.Text()
+			}
+
+			w.Header().Set("X-Request-ID", xRequestId)
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 func newServer(store store.Store, port int, cancel context.CancelFunc, logger *slog.Logger) *server {
 	mux := http.NewServeMux()
 
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", port),
-		Handler: requestLogger(logger)(mux),
+		Handler: requestIdMiddleware()(requestLogger(logger)(mux)),
 	}
 
 	s := &server{

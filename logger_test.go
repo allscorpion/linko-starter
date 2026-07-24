@@ -28,21 +28,22 @@ func Test_requestLogger(t *testing.T) {
 
 	requestLoggerMiddleware := requestLogger(logger)
 	dummyHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+
 	loggedHandler := requestLoggerMiddleware(dummyHandler)
 
-	req := httptest.NewRequest("GET", "http://lin.ko/api/stats", nil)
+	req := httptest.NewRequest("GET", "http://localhost:8080/test?foo=bar", nil)
+
 	rr := httptest.NewRecorder()
+
 	loggedHandler.ServeHTTP(rr, req)
 
-	const expectedLogString = `time=2023-10-01T12:34:57.000Z level=INFO msg="Served request" method=GET path=/api/stats client_ip=192.0.2.1:1234` + "\n"
-	const expectedStatusCode = http.StatusOK
-
-	// replace the .Skip() call with two checks to verify the log string and status code here
-	// If either doesn't match, use t.Errorf to report the failure with a helpful message.
-	if logBuffer.String() != expectedLogString {
-		t.Errorf("\nexpected log message: \n\t%sGot:\n\t%s", logBuffer.String(), expectedLogString)
+	if rr.Code != http.StatusOK {
+		t.Errorf("Expected status code 200, got %d", rr.Code)
 	}
-	if rr.Code != expectedStatusCode {
-		t.Errorf("status codes do not match: %v %v", rr.Code, expectedStatusCode)
+
+	expectedLog := `time=2023-10-01T12:34:57.000Z level=INFO msg="Served request" method=GET path=/test client_ip=192.0.2.x
+`
+	if logBuffer.String() != expectedLog {
+		t.Errorf("Expected log output:\n%s\nGot:\n%s", expectedLog, logBuffer.String())
 	}
 }

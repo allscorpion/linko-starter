@@ -6,8 +6,10 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/signal"
+	"slices"
 	"syscall"
 	"time"
 
@@ -63,7 +65,44 @@ func errorAttrs(err error) []slog.Attr {
 	return attrs
 }
 
+const redacted = "[REDACTED]"
+
+func redactUrl(val string) string {
+	if val == "" {
+		return ""
+	}
+	u, err := url.Parse(val)
+
+	if err != nil {
+		return ""
+	}
+
+	_, exists := u.User.Password()
+
+	if !exists {
+		return ""
+	}
+
+	u.User = url.UserPassword(u.User.Username(), redacted)
+
+	return u.String()
+}
+
+var sensitiveKeys = []string{"password", "key", "apikey", "secret", "pin", "creditcardno", "user"}
+
 func replaceAttr(groups []string, a slog.Attr) slog.Attr {
+	if slices.Contains(sensitiveKeys, a.Key) {
+		return slog.String(a.Key, redacted)
+	}
+
+	if a.Value.Kind() == slog.KindString {
+		strVal := redactUrl(a.Value.String())
+
+		if strVal != "" {
+			return slog.String(a.Key, strVal)
+		}
+	}
+
 	if a.Key == "error" {
 		err, ok := a.Value.Any().(error)
 		if !ok {
